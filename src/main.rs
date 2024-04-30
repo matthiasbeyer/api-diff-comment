@@ -127,26 +127,8 @@ fn main() -> Result<(), miette::Error> {
         dir
     };
 
-    let base = args.base.clone();
-    let cwd_clone = cwd.clone();
-    let base_doc = std::thread::spawn(move || {
-        build_pubapi_for_reference(&cwd_clone, &base, &base_wt_path)
-    });
-
-    let target = args.target.clone();
-    let target_doc = std::thread::spawn(move || {
-        build_pubapi_for_reference(&cwd, &target, &target_wt_path)
-    });
-
-    let base_doc = base_doc
-        .join()
-        .map_err(|_| miette::miette!("Failed to join thread"))
-        .and_then(std::convert::identity)?;
-
-    let target_doc = target_doc
-        .join()
-        .map_err(|_| miette::miette!("Failed to join thread"))
-        .and_then(std::convert::identity)?;
+    let base_doc = build_pubapi_for_reference(&cwd, &args.base, &base_wt_path)?;
+    let target_doc = build_pubapi_for_reference(&cwd, &args.target, &target_wt_path)?;
 
     let diff = public_api::diff::PublicApiDiff::between(base_doc, target_doc);
 

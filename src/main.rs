@@ -114,26 +114,13 @@ fn main() -> Result<(), miette::Error> {
 
     tracing::info!(path = %tempdir.path().display(), "Tempdir path found!");
 
-    {
-        if !git2::Reference::is_valid_name(&args.base) {
-            miette::bail!("'{}' is not a valid git reference", args.base);
-        }
-
-        if !git2::Reference::is_valid_name(&args.target) {
-            miette::bail!("'{}' is not a valid git reference", args.target);
-        }
-    }
-
     let cwd = std::env::current_dir().into_diagnostic()?;
-    let pid = std::process::id();
 
-    let base_wt_name = format!("api-diff-comment-worktree-base-{}", pid);
     let base_wt_path = {
         let mut dir = tempdir.path().to_path_buf();
         dir.push("base");
         dir
     };
-    let target_wt_name = format!("api-diff-comment-worktree-target-{}", pid);
     let target_wt_path = {
         let mut dir = tempdir.path().to_path_buf();
         dir.push("target");
@@ -143,12 +130,12 @@ fn main() -> Result<(), miette::Error> {
     let base = args.base.clone();
     let cwd_clone = cwd.clone();
     let base_doc = std::thread::spawn(move || {
-        build_pubapi_for_reference(&cwd_clone, &base, &base_wt_name, &base_wt_path)
+        build_pubapi_for_reference(&cwd_clone, &base, &base_wt_path)
     });
 
     let target = args.target.clone();
     let target_doc = std::thread::spawn(move || {
-        build_pubapi_for_reference(&cwd, &target, &target_wt_name, &target_wt_path)
+        build_pubapi_for_reference(&cwd, &target, &target_wt_path)
     });
 
     let base_doc = base_doc
@@ -207,19 +194,40 @@ fn main() -> Result<(), miette::Error> {
 fn build_pubapi_for_reference(
     cwd: &Path,
     reference: &str,
-    wt_name: &str,
     wt_path: &Path,
 ) -> Result<public_api::PublicApi, miette::Error> {
-    let repository = git2::Repository::discover(cwd).into_diagnostic()?;
+    let wt_path = wt_path
+        .to_str()
+        .ok_or_else(|| miette::miette!("Path is not UTF8: {}", wt_path.display()))?;
 
-    let reference = repository.find_reference(reference).into_diagnostic()?;
-    let wt = repository
-        .worktree(
-            wt_name,
-            wt_path,
-            Some(git2::WorktreeAddOptions::new().reference(Some(&reference))),
-        )
-        .into_diagnostic()?;
+    {
+        let mut cmd = std::process::Command::new("git");
+        cmd.current_dir(cwd);
+        cmd.args(["worktree", "add", wt_path, reference]);
+        let cmdout = cmd
+            .spawn()
+            .map_err(|e| miette::miette!("Failed to spawn git-worktree: {}", e))?
+            .wait()
+            .map_err(|e| miette::miette!("Failed to run git-worktree: {}", e))?;
+
+        if !cmdout.success() {
+            miette::bail!("git-worktree {} {} failed", wt_path, reference)
+        }
+    }
+    {
+        let mut cmd = std::process::Command::new("git");
+        cmd.current_dir(cwd);
+        cmd.args(["checkout", reference]);
+        let cmdout = cmd
+            .spawn()
+            .map_err(|e| miette::miette!("Failed to spawn git-checkout: {}", e))?
+            .wait()
+            .map_err(|e| miette::miette!("Failed to run git-checkout: {}", e))?;
+
+        if !cmdout.success() {
+            miette::bail!("git-checkout {} failed", reference)
+        }
+    }
 
     let build_json = || {
         rustdoc_json::Builder::default()
@@ -229,7 +237,22 @@ fn build_pubapi_for_reference(
     };
 
     let json = build_json();
-    wt.prune(None).into_diagnostic()?;
+
+    {
+        let mut cmd = std::process::Command::new("git");
+        cmd.current_dir(cwd);
+        cmd.args(["worktree", "remove", "-f", wt_path]);
+        let cmdout = cmd
+            .spawn()
+            .map_err(|e| miette::miette!("Failed to spawn git-worktree: {}", e))?
+            .wait()
+            .map_err(|e| miette::miette!("Failed to run git-worktree: {}", e))?;
+
+        if !cmdout.success() {
+            miette::bail!("git-worktree remove -f {} failed", wt_path)
+        }
+    }
+
     let json = json.into_diagnostic()?;
 
     let doc = public_api::Builder::from_rustdoc_json(json)
